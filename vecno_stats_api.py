@@ -14,11 +14,13 @@ state = {
 }
 
 TOTAL_REGEX = re.compile(
-    r"Total hashrate:\s*([\d.]+)\s*Mhash/s.*\((\d+)\s+CPU.*,\s*(\d+)\s+GPUs\)"
+    r"Total hashrate:\s*([\d.]+)\s*Mhash/s.*\(\s*(\d+)\s+CPU.*?,\s*(\d+)\s+GPU",
+    re.IGNORECASE
 )
 
 GPU_REGEX = re.compile(
-    r"GPU\s+#(\d+)\s+(.+?)\s+hashrate:\s*([\d.]+)\s*Mhash/s"
+    r"GPU\s+#(\d+)\s+(.+?)\s+hashrate:\s*([\d.]+)\s*Mhash/s",
+    re.IGNORECASE
 )
 
 def follow_log():
