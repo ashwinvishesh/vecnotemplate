@@ -4,7 +4,7 @@ import os
 import threading
 from flask import Flask, jsonify
 # =========================
-# V3 Script
+# V4 Script
 # =========================
 # Configuration
 # =========================
@@ -158,4 +158,4 @@ if __name__ == "__main__":
     threading.Thread(target=follow_log, daemon=True).start()
 
     # Bind to localhost only
-    app.run(host="127.0.0.1", port=8080)
+    app.run(host="0.0.0.0", port=8080)
