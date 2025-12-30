@@ -1,8 +1,10 @@
 import time
 import re
 import os
+import threading
 from flask import Flask, jsonify
-
+# =========================
+# V3 Script
 # =========================
 # Configuration
 # =========================
@@ -10,6 +12,7 @@ from flask import Flask, jsonify
 LOG_FILE = "/root/debug.log"
 STALE_THRESHOLD_SEC = 30
 READ_BACK_LINES = 300
+LOG_POLL_INTERVAL = 0.2
 
 # =========================
 # App & State
@@ -17,24 +20,25 @@ READ_BACK_LINES = 300
 
 app = Flask(__name__)
 
+state_lock = threading.Lock()
+
 state = {
     "total_hashrate_mh": None,
-    "gpu_count": 0,
-    "gpu_hashrates": {},   # internal map: gpu_id -> {name, hashrate_mh}
+    "gpu_hashrates": {},     # gpu_id -> {name, hashrate_mh}
     "last_update": None
 }
 
 # =========================
-# Regex (hardened)
+# Regex (robust)
 # =========================
 
 TOTAL_REGEX = re.compile(
-    r"Total hashrate:\s*([\d.]+)\s*Mhash/s.*\(\s*(\d+)\s+CPU.*?,\s*(\d+)\s+GPU",
+    r"Total\s+hashrate:\s*([\d.]+)\s*Mhash/s",
     re.IGNORECASE
 )
 
 GPU_REGEX = re.compile(
-    r"GPU\s+#(\d+)\s+(.+?)\s+hashrate:\s*([\d.]+)\s*Mhash/s",
+    r"GPU\s*#(\d+)\s+(.+?)\s+hashrate:\s*([\d.]+)\s*Mhash/s",
     re.IGNORECASE
 )
 
@@ -43,11 +47,14 @@ GPU_REGEX = re.compile(
 # =========================
 
 def process_line(line: str):
+    now = time.time()
+
     total_match = TOTAL_REGEX.search(line)
     if total_match:
-        state["total_hashrate_mh"] = float(total_match.group(1))
-        state["gpu_count"] = int(total_match.group(3))
-        state["last_update"] = time.time()
+        with state_lock:
+            state["total_hashrate_mh"] = float(total_match.group(1))
+            state["gpu_hashrates"].clear()  # reset GPUs on new cycle
+            state["last_update"] = now
         return
 
     gpu_match = GPU_REGEX.search(line)
@@ -56,34 +63,54 @@ def process_line(line: str):
         gpu_name = gpu_match.group(2).strip()
         hashrate = float(gpu_match.group(3))
 
-        state["gpu_hashrates"][gpu_id] = {
-            "name": gpu_name,
-            "hashrate_mh": hashrate
-        }
+        with state_lock:
+            state["gpu_hashrates"][gpu_id] = {
+                "name": gpu_name,
+                "hashrate_mh": hashrate
+            }
+            state["last_update"] = now
+
+# =========================
+# Log Follower
+# =========================
 
 def follow_log():
+    last_inode = None
+    file_offset = 0
+
     while True:
         if not os.path.exists(LOG_FILE):
             time.sleep(1)
             continue
 
         try:
-            with open(LOG_FILE, "r") as f:
-                # 1️⃣ Process recent history
-                lines = f.readlines()[-READ_BACK_LINES:]
-                for line in lines:
-                    process_line(line)
+            stat = os.stat(LOG_FILE)
+            inode = stat.st_ino
 
-                # 2️⃣ Follow new lines
+            # Detect new file / rotation
+            if inode != last_inode:
+                last_inode = inode
+                file_offset = 0
+
+                with open(LOG_FILE, "r") as f:
+                    lines = f.readlines()[-READ_BACK_LINES:]
+                    for line in lines:
+                        process_line(line)
+                    file_offset = f.tell()
+
+            with open(LOG_FILE, "r") as f:
+                f.seek(file_offset)
+
                 while True:
                     line = f.readline()
                     if not line:
-                        time.sleep(0.2)
+                        time.sleep(LOG_POLL_INTERVAL)
                         if not os.path.exists(LOG_FILE):
-                            break  # log rotated or miner restarted
+                            break
                         continue
 
                     process_line(line)
+                    file_offset = f.tell()
 
         except Exception as e:
             print(f"[log-follow] error: {e}")
@@ -97,25 +124,29 @@ def follow_log():
 def stats():
     now = time.time()
 
-    gpus_array = [
-        {
-            "id": gpu_id,
-            "gpu_name": gpu["name"],
-            "hashrate_mh": gpu["hashrate_mh"]
-        }
-        for gpu_id, gpu in sorted(state["gpu_hashrates"].items())
-    ]
+    with state_lock:
+        gpus_array = [
+            {
+                "id": gpu_id,
+                "gpu_name": gpu["name"],
+                "hashrate_mh": gpu["hashrate_mh"]
+            }
+            for gpu_id, gpu in sorted(state["gpu_hashrates"].items())
+        ]
+
+        last_update = state["last_update"]
+        total_hashrate = state["total_hashrate_mh"]
 
     stale = (
-        state["last_update"] is None or
-        now - state["last_update"] > STALE_THRESHOLD_SEC
+        last_update is None or
+        now - last_update > STALE_THRESHOLD_SEC
     )
 
     return jsonify({
-        "total_hashrate_mh": state["total_hashrate_mh"],
-        "gpu_count": state["gpu_count"],
+        "total_hashrate_mh": total_hashrate,
+        "gpu_count": len(gpus_array),
         "gpus": gpus_array,
-        "last_update": state["last_update"],
+        "last_update": last_update,
         "stale": stale
     })
 
@@ -124,9 +155,7 @@ def stats():
 # =========================
 
 if __name__ == "__main__":
-    import threading
-
     threading.Thread(target=follow_log, daemon=True).start()
 
-    # Bind to localhost only (secure, Clore-safe)
+    # Bind to localhost only
     app.run(host="127.0.0.1", port=8080)
